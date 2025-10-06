@@ -3475,6 +3475,90 @@ class TestGetTerminalSize(unittest.TestCase):
             self.assertEqual(size.lines, 40)
 
 
+class TestMakeArchiveFollowLinks(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tempdir)
+
+        # Create real directory and files
+        self.real_dir = os.path.join(self.tempdir, "real_dir")
+        os.mkdir(self.real_dir)
+        self.file_path = os.path.join(self.real_dir, "file.txt")
+        with open(self.file_path, "w") as f:
+            f.write("hello world")
+
+        # Create symbolic links
+        self.link_to_file = os.path.join(self.tempdir, "link_to_file.txt")
+        self.link_to_dir = os.path.join(self.tempdir, "link_to_dir")
+        os.symlink(self.file_path, self.link_to_file)
+        os.symlink(self.real_dir, self.link_to_dir, target_is_directory=True)
+
+    def _extract_tar(self, archive_name):
+        with tarfile.open(archive_name, "r:gz") as tf:
+            members = tf.getnames()
+            extracted = {}
+            for m in members:
+                info = tf.getmember(m)
+                if info.isfile():
+                    extracted[m] = tf.extractfile(m).read().decode()
+                elif info.issym():
+                    extracted[m] = f"SYMLINK->{info.linkname}"
+            return extracted
+
+    def _extract_zip(self, archive_name):
+        with zipfile.ZipFile(archive_name, "r") as zf:
+            extracted = {}
+            for n in zf.namelist():
+                try:
+                    data = zf.read(n).decode()
+                    extracted[n] = data
+                except Exception:
+                    extracted[n] = None
+            return extracted
+
+    @os_helper.skip_unless_symlink
+    def test_tar_follow_links_true(self):
+        base = os.path.join(self.tempdir, "tar_follow_true")
+        archive = shutil.make_archive(base, "gztar", root_dir=self.tempdir, follow_links=True)
+        extracted = self._extract_tar(archive)
+        # Both symlinks should be resolved to real file contents
+        self.assertIn("./link_to_file.txt", extracted)
+        self.assertEqual(extracted["./link_to_file.txt"], "hello world")
+        self.assertIn("./link_to_dir/file.txt", extracted)
+        self.assertEqual(extracted["./link_to_dir/file.txt"], "hello world")
+
+    @os_helper.skip_unless_symlink
+    def test_tar_follow_links_false(self):
+        base = os.path.join(self.tempdir, "tar_follow_false")
+        archive = shutil.make_archive(base, "gztar", root_dir=self.tempdir, follow_links=False)
+        with tarfile.open(archive, "r:gz") as tf:
+            file_info = tf.getmember("./link_to_file.txt")
+            dir_info = tf.getmember("./link_to_dir")
+            self.assertTrue(file_info.issym())
+            self.assertTrue(dir_info.issym())
+
+    @os_helper.skip_unless_symlink
+    def test_zip_follow_links_true(self):
+        base = os.path.join(self.tempdir, "zip_follow_true")
+        archive = shutil.make_archive(base, "zip", root_dir=self.tempdir, follow_links=True)
+        extracted = self._extract_zip(archive)
+        # Both symlinks should be resolved
+        self.assertIn("link_to_file.txt", extracted)
+        self.assertEqual(extracted["link_to_file.txt"], "hello world")
+        self.assertIn("link_to_dir/file.txt", extracted)
+        self.assertEqual(extracted["link_to_dir/file.txt"], "hello world")
+
+    @os_helper.skip_unless_symlink
+    def test_zip_follow_links_false(self):
+        base = os.path.join(self.tempdir, "zip_follow_false")
+        archive = shutil.make_archive(base, "zip", root_dir=self.tempdir, follow_links=False)
+        extracted = self._extract_zip(archive)
+        # Symlink to file should be resolved
+        self.assertIn("link_to_file.txt", extracted)
+        self.assertEqual(extracted["link_to_file.txt"], "hello world")
+        # Symlink to directory should remain as a link (no file.txt inside)
+        self.assertNotIn("link_to_dir/file.txt", extracted)
+
 class PublicAPITests(unittest.TestCase):
     """Ensures that the correct values are exposed in the public API."""
 
