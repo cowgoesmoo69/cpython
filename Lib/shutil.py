@@ -990,7 +990,7 @@ def _get_uid(name):
     return None
 
 def _make_tarball(base_name, base_dir, compress="gzip", verbose=0, dry_run=0,
-                  owner=None, group=None, logger=None, root_dir=None):
+                  owner=None, group=None, logger=None, root_dir=None, follow_links=0):
     """Create a (possibly compressed) tar file from all the files under
     'base_dir'.
 
@@ -999,6 +999,9 @@ def _make_tarball(base_name, base_dir, compress="gzip", verbose=0, dry_run=0,
     'owner' and 'group' can be used to define an owner and a group for the
     archive that is being built. If not provided, the current owner and group
     will be used.
+
+    'follow_links' controls the dereference parameter when tarfile.open()
+    is called.
 
     The output tar file will be named 'base_name' +  ".tar", possibly plus
     the appropriate compression extension (".gz", ".bz2", ".xz", or ".zst").
@@ -1048,7 +1051,7 @@ def _make_tarball(base_name, base_dir, compress="gzip", verbose=0, dry_run=0,
         return tarinfo
 
     if not dry_run:
-        tar = tarfile.open(archive_name, 'w|%s' % tar_compression)
+        tar = tarfile.open(archive_name, 'w|%s' % tar_compression, dereference=follow_links)
         arcname = base_dir
         if root_dir is not None:
             base_dir = os.path.join(root_dir, base_dir)
@@ -1062,8 +1065,10 @@ def _make_tarball(base_name, base_dir, compress="gzip", verbose=0, dry_run=0,
     return archive_name
 
 def _make_zipfile(base_name, base_dir, verbose=0, dry_run=0,
-                  logger=None, owner=None, group=None, root_dir=None):
+                  logger=None, owner=None, group=None, root_dir=None, follow_links=0):
     """Create a zip file from all the files under 'base_dir'.
+
+    'follow_links' controls the followlinks parameter when os.walk() is called.
 
     The output zip file will be named 'base_name' + ".zip".  Returns the
     name of the output zip file.
@@ -1094,7 +1099,7 @@ def _make_zipfile(base_name, base_dir, verbose=0, dry_run=0,
                 zf.write(base_dir, arcname)
                 if logger is not None:
                     logger.info("adding '%s'", base_dir)
-            for dirpath, dirnames, filenames in os.walk(base_dir):
+            for dirpath, dirnames, filenames in os.walk(base_dir, followlinks=follow_links):
                 arcdirpath = dirpath
                 if root_dir is not None:
                     arcdirpath = os.path.relpath(arcdirpath, root_dir)
@@ -1182,22 +1187,67 @@ def unregister_archive_format(name):
     del _ARCHIVE_FORMATS[name]
 
 def make_archive(base_name, format, root_dir=None, base_dir=None, verbose=0,
-                 dry_run=0, owner=None, group=None, logger=None):
-    """Create an archive file (eg. zip or tar).
+                 dry_run=0, owner=None, group=None, logger=None, follow_links=0):
+    """Create an archive file (e.g. zip or tar). Returns the name of the archive file.
 
     'base_name' is the name of the file to create, minus any format-specific
-    extension; 'format' is the archive format: one of "zip", "tar", "gztar",
+    extension.
+    
+    'format' is the archive format: one of "zip", "tar", "gztar",
     "bztar", "xztar", or "zstdtar".  Or any other registered format.
 
     'root_dir' is a directory that will be the root directory of the
-    archive; ie. we typically chdir into 'root_dir' before creating the
-    archive.  'base_dir' is the directory where we start archiving from;
-    ie. 'base_dir' will be the common prefix of all files and
-    directories in the archive.  'root_dir' and 'base_dir' both default
-    to the current directory.  Returns the name of the archive file.
+    archive; i.e. we typically chdir into 'root_dir' before creating the
+    archive.
+    
+    'base_dir' is the directory where we start archiving from;
+    i.e. 'base_dir' will be the common prefix of all files and
+    directories in the archive.
+    
+    'root_dir' and 'base_dir' both default to the current directory if not supplied.
 
     'owner' and 'group' are used when creating a tar archive. By default,
     uses the current owner and group.
+
+    'follow_links' is passed to the function called in the registered archive 
+    format, to modify the default behaviour in relation to hard links and 
+    symbolic links.
+
+    For the "zip" format, the _make_zipfile() function uses os.walk() to 
+    determine which files to include.
+    By default os.walk():
+    - resolves hard links. Multiple hard links to the same file results in 
+      multiple copies of the file in the archive.
+    - resolves symbolic links to files; the file pointed to by a link is 
+      included in the archive.
+    - does not resolve symbolic links to directories; the files in the 
+      directory pointed to by a link are not included, only a symbolic link
+      to the directory is included.
+    Setting 'follow_links' to True will set the followlinks parameter to True 
+    when os.walk() is called. This results in os.walk() resolving a symbolic 
+    link to a directory and including the directory's contents in the archive.
+    WARNING: os.walk() does not keep track of which directories have already 
+    been visited. If a symbolic link points to a parent directory of itself, 
+    the result is infinite recursion.
+
+    For the (optionally compressed) tar formats, the _make_tarball() function 
+    uses the tarfile module.
+    By default tarfile:
+    - intelligently resolves hard links. A single hard link to a file results 
+      in the file being stored in the archive. Multiple hard links to the same 
+      file results in one copy of the file's contents being stored in the 
+      archive; the other hard links are stored as hard links. When the tar is 
+      extracted in its entirety, all the hard links are resolved and multiple 
+      copies of the linked file are produced in the output.
+    - does not resolve symbolic links to files.
+    - does not resolve symbolic links to directories.
+    Setting 'follow_links' to True will change the behaviour. Thus, tarfile:
+    - resolves hard links. Multiple hard links to the same file results in 
+      multiple copies of the file in the archive.
+    - resolves symbolic links to files; a file pointed to by a link is included
+      in the archive.
+    - resolves symbolic links to directories; the files in a directory pointed
+      to by a link are included in the archive.
     """
     sys.audit("shutil.make_archive", base_name, format, root_dir, base_dir)
     try:
@@ -1206,7 +1256,8 @@ def make_archive(base_name, format, root_dir=None, base_dir=None, verbose=0,
         raise ValueError("unknown archive format '%s'" % format) from None
 
     kwargs = {'dry_run': dry_run, 'logger': logger,
-              'owner': owner, 'group': group}
+              'owner': owner, 'group': group,
+              'follow_links': follow_links}
 
     func = format_info[0]
     for arg, val in format_info[1]:
